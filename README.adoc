@@ -1,0 +1,133 @@
+= Spring boot starter for http://www.grpc.io/[gRPC framework.] https://bintray.com/lognet/maven/grpc-spring-boot-starter/_latestVersion[ image:https://api.bintray.com/packages/lognet/maven/grpc-spring-boot-starter/images/download.svg[Download]] image:https://travis-ci.org/LogNet/grpc-spring-boot-starter.svg?branch=master[Build Status,link=https://travis-ci.org/LogNet/grpc-spring-boot-starter] https://bintray.com/lognet/maven/grpc-spring-boot-starter?source=watch[ image:https://www.bintray.com/docs/images/bintray_badge_color.png[]]
+
+
+
+== Features
+
+Auto-configures and runs the embedded gRPC server with @GRpcService-enabled beans as part of spring-boot application.
+
+== Setup
+
+[source,gradle]
+----
+repositories {  
+   jcenter()  
+   // maven { url "http://oss.jfrog.org/oss-snapshot-local" } //for snashot builds
+   
+}
+dependencies {
+    compile('org.lognet:grpc-spring-boot-starter:0.0.6')
+}
+----
+
+[NOTE]
+If you are using protobuf version lower than `3.0.0`, please use `org.lognet:grpc-spring-boot-starter:0.0.3`
+
+== Usage
+
+* Start by https://github.com/google/protobuf-gradle-plugin[generating] stub and server interface(s) from your `.proto` file(s).
+* Annotate your server interface implementation(s) with `@org.lognet.springboot.grpc.GRpcService`
+* Optionally configure the server port in your `application.yml/properties`. Default port is `6565`
+[source,yaml]
+----
+ grpc:
+    port : 6565
+----
+
+== Show case
+
+In the 'grpc-spring-boot-starter-demo' project you can find fully functional example with integration test.
+
+=== Service implementation
+The service definition from `.proto` file looks like this :
+[source,proto]
+----
+service Greeter {
+    rpc SayHello ( HelloRequest) returns (  HelloReply) {}
+}
+----
+
+Note the generated `io.grpc.examples.GreeterGrpc.GreeterImplBase` class that extends `io.grpc.BindableService`.(The generated classes were intentionally committed for demo purposes).
+
+All you need to do is to annotate your service implementation with `@org.lognet.springboot.grpc.GRpcService`
+
+[source,java]
+----
+    @GRpcService
+    public static class GreeterService extends  GreeterGrpc.GreeterImplBase{
+        @Override
+        public void sayHello(GreeterOuterClass.HelloRequest request, StreamObserver<GreeterOuterClass.HelloReply> responseObserver) {
+            final GreeterOuterClass.HelloReply.Builder replyBuilder = GreeterOuterClass.HelloReply.newBuilder().setMessage("Hello " + request.getName());
+            responseObserver.onNext(replyBuilder.build());
+            responseObserver.onCompleted();
+        }
+    }
+----
+
+=== Interceptors support
+The starter supports the registration of two kinds of interceptors: _Global_  and _Per Service_. +
+In both cases the interceptor has to implement `io.grpc.ServerInterceptor` interface.
+
+- Per service
+
+[source,java]
+----
+@GRpcService(interceptors = { LogInterceptor.class })
+public  class GreeterService extends  GreeterGrpc.GreeterImplBase{
+    // ommited
+}
+----
+`LogInterceptor` will be instantiated via spring factory if there is bean of type `LogInterceptor`, or via no-args constructor otherwise.
+
+- Global
+
+[source,java]
+----
+@GRpcGlobalInterceptor
+public  class MyInterceptor implements ServerInterceptor{
+    // ommited
+}
+----
+
+The annotation on java config factory method is also supported :
+
+[source,java]
+----
+ @Configuration
+ public class MyConfig{
+     @Bean
+     @GRpcGlobalInterceptor
+     public  ServerInterceptor globalInterceptor(){
+         new ServerInterceptor(){
+             @Override
+             public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+                // your logic here
+                 return next.startCall(call, headers);
+             }
+         };
+     }
+ }
+----
+
+The particular service also has the opportunity to disable the global interceptors :
+
+[source,java]
+----
+@GRpcService(applyGlobalInterceptors = false)
+public  class GreeterService extends  GreeterGrpc.GreeterImplBase{
+    // ommited
+}
+----
+
+
+
+
+== On the roadmap
+
+* Customized gRPC server builder with compression/decompression registry .
+* Custom `Executor` service.
+* Transport security.
+
+== License
+
+Apache 2.0

@@ -1,35 +1,36 @@
 package org.lognet.springboot.grpc;
 
-import java.lang.reflect.Method;
-import java.util.Arrays;
-import java.util.Optional;
-
+import io.grpc.*;
+import lombok.extern.slf4j.Slf4j;
 import org.lognet.springboot.grpc.autoconfigure.GRpcServerProperties;
+import org.springframework.beans.factory.BeanCreationException;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.ApplicationContext;
-import org.springframework.core.annotation.AnnotationUtils;
-import org.springframework.util.ReflectionUtils;
+import org.springframework.context.support.AbstractApplicationContext;
+import org.springframework.core.type.StandardMethodMetadata;
+import org.springframework.util.StreamUtils;
 
-import io.grpc.Server;
-import io.grpc.ServerBuilder;
-import io.grpc.ServerServiceDefinition;
-import lombok.extern.slf4j.Slf4j;
+import java.lang.annotation.Annotation;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  *  Hosts embedded gRPC server.
  */
 @Slf4j
-public class GRpcServerRunner implements CommandLineRunner,DisposableBean {
-
-    /**
-     * Name of static function of gRPC service-outer class that creates {@link io.grpc.ServerServiceDefinition}.
-     */
-    private static final String bindServiceMethodName = "bindService";
+public class GRpcServerRunner implements CommandLineRunner,DisposableBean  {
 
     @Autowired
-    private ApplicationContext applicationContext;
+    private AbstractApplicationContext applicationContext;
 
     @Autowired
     private GRpcServerProperties gRpcServerProperties;
@@ -44,28 +45,18 @@ public class GRpcServerRunner implements CommandLineRunner,DisposableBean {
         }
         log.info("Starting gRPC Server ...");
 
+        Collection<ServerInterceptor> globalInterceptors = getTypedBeansWithAnnotation(GRpcGlobalInterceptor.class,ServerInterceptor.class);
         final ServerBuilder<?> serverBuilder = ServerBuilder.forPort(gRpcServerProperties.getPort());
 
         // find and register all GRpcService-enabled beans
-        for(Object grpcService : applicationContext.getBeansWithAnnotation(GRpcService.class).values()) {
-            final Class<?> grpcServiceOuterClass = AnnotationUtils.findAnnotation(grpcService.getClass(), GRpcService.class).grpcServiceOuterClass();
+        for(BindableService bindableService : getTypedBeansWithAnnotation(GRpcService.class,BindableService.class)) {
 
-            // find 'bindService' method on outer class.
-            final Optional<Method> bindServiceMethod = Arrays.asList(ReflectionUtils.getAllDeclaredMethods(grpcServiceOuterClass)).stream().filter(
-                    method ->  bindServiceMethodName.equals(method.getName()) && 1 == method.getParameterCount() && method.getParameterTypes()[0].isAssignableFrom(grpcService.getClass())
-            ).findFirst();
-
-            // register service
-            if (bindServiceMethod.isPresent()) {
-                ServerServiceDefinition serviceDefinition = (ServerServiceDefinition) bindServiceMethod.get().invoke(null, grpcService);
+                ServerServiceDefinition serviceDefinition = bindableService.bindService();
+                GRpcService gRpcServiceAnn = bindableService.getClass().getAnnotation(GRpcService.class);
+                serviceDefinition  = bindInterceptors(serviceDefinition,gRpcServiceAnn,globalInterceptors);
                 serverBuilder.addService(serviceDefinition);
-                log.info("'{}' service has been registered.", serviceDefinition.getName());
-            } else {
-                throw new IllegalArgumentException(String.format("Failed to find '%s' method on class %s.\r\n" +
-                                "Please make sure you've provided correct 'grpcServiceOuterClass' attribute for '%s' annotation.\r\n" +
-                                "It should be the protoc-generated outer class of your service."
-                        , bindServiceMethodName,grpcServiceOuterClass.getName(), GRpcService.class.getName()));
-            }
+                log.info("'{}' service has been registered.", bindableService.getClass().getName());
+
         }
 
         server = serverBuilder.build().start();
@@ -73,6 +64,30 @@ public class GRpcServerRunner implements CommandLineRunner,DisposableBean {
         startDaemonAwaitThread();
 
     }
+
+    private  ServerServiceDefinition bindInterceptors(ServerServiceDefinition serviceDefinition, GRpcService gRpcService, Collection<ServerInterceptor> globalInterceptors) {
+
+
+        Stream<? extends ServerInterceptor> privateInterceptors = Stream.of(gRpcService.interceptors())
+                .map(interceptorClass -> {
+                    try {
+                        return 0 < applicationContext.getBeanNamesForType(interceptorClass).length ?
+                                applicationContext.getBean(interceptorClass) :
+                                interceptorClass.newInstance();
+                    } catch (Exception e) {
+                        throw  new BeanCreationException("Failed to create interceptor instance.",e);
+                    }
+                });
+
+        List<ServerInterceptor> interceptors = Stream.concat(
+                    gRpcService.applyGlobalInterceptors() ? globalInterceptors.stream(): Stream.empty(),
+                    privateInterceptors)
+                .distinct()
+                .collect(Collectors.toList());
+        return ServerInterceptors.intercept(serviceDefinition, interceptors);
+    }
+
+
 
     private void startDaemonAwaitThread() {
         Thread awaitThread = new Thread() {
@@ -98,4 +113,23 @@ public class GRpcServerRunner implements CommandLineRunner,DisposableBean {
         Optional.ofNullable(server).ifPresent(Server::shutdown);
         log.info("gRPC server stopped.");
     }
+
+    private <T> Collection<T> getTypedBeansWithAnnotation(Class<? extends Annotation> annotationType, Class<T> beanType) throws Exception{
+
+
+       return Stream.of(applicationContext.getBeanNamesForType(beanType))
+                .filter(name->{
+                    BeanDefinition beanDefinition = applicationContext.getBeanFactory().getBeanDefinition(name);
+                    if( beanDefinition.getSource() instanceof StandardMethodMetadata) {
+                        StandardMethodMetadata metadata = (StandardMethodMetadata) beanDefinition.getSource();
+                        return metadata.isAnnotated(annotationType.getName());
+                    }
+                    return null!= applicationContext.getBeanFactory().findAnnotationOnBean(name,annotationType);
+                })
+               .map(name -> applicationContext.getBeanFactory().getBean(name,beanType))
+               .collect(Collectors.toList());
+
+    }
+
+
 }
